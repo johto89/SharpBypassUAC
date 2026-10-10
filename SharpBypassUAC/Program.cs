@@ -19,6 +19,7 @@ namespace SharpBypassUAC
             Console.WriteLine("    sdclt            Folder registry hijack via sdclt.exe (Win10 only)");
             Console.WriteLine("    slui             exefile registry hijack via slui.exe");
             Console.WriteLine("    diskcleanup      Environment variable hijack via SilentCleanup task");
+            Console.WriteLine("    shadercache      Intel ShaderCache junction + DLL hijack (x64, requires Intel GPU)");
             Console.WriteLine("    cmstp            CMSTPLUA COM elevation (no registry modification)");
             Console.WriteLine();
             Console.WriteLine("Token Impersonation:");
@@ -119,6 +120,9 @@ namespace SharpBypassUAC
                             break;
                         case "diskcleanup":
                             new DiskCleanup(encodedCommand);
+                            break;
+                        case "shadercache":
+                            new IntelShaderCache(encodedCommand);
                             break;
                         case "cmstp":
                             new CmsTPLua(encodedCommand);
