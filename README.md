@@ -14,6 +14,7 @@ No external dependencies. Builds with standalone `csc.exe` (no Visual Studio or 
   - [UAC Bypass (`-b`)](#uac-bypass--b--medium--high-integrity)
   - [Token Impersonation (`-t`)](#token-impersonation--t--high--system-or-other-identity)
   - [Chaining: Medium → High → SYSTEM](#chaining-medium--high--system)
+  - [Additional Options](#additional-options)
 - [Techniques](#techniques)
   - [Registry Hijack Bypasses](#1-registry-hijack-bypasses)
     - [fodhelper](#fodhelper)
@@ -187,6 +188,27 @@ SharpBypassUAC.exe -b fodhelper -e <base64_reverse_shell>
 SharpBypassUAC.exe -t 624 -e <base64_payload>
 #   → Process running as NT AUTHORITY\SYSTEM
 ```
+
+### Additional Options
+
+| Flag | Description |
+|------|-------------|
+| `-c` | Anti-forensic cleanup: ETW patch, Prefetch/ShimCache/BAM wipe, self-delete |
+| `--blind-log` | Sysmon evasion: unload SysmonDrv minifilter + suspend EventLog threads (Phant0m) |
+
+**`--blind-log`** disables host logging before the bypass executes:
+1. Calls `FilterUnload("SysmonDrv")` to unload the Sysmon kernel driver
+2. Suspends all `wevtsvc.dll` threads in the EventLog svchost — the service stays "running" but writes no events
+
+```bash
+# UAC bypass with logging evasion
+SharpBypassUAC.exe -b fodhelper -e <base64command> --blind-log
+
+# Combined with anti-forensic cleanup
+SharpBypassUAC.exe -b cmstp -e <base64command> -c --blind-log
+```
+
+> **Note:** `--blind-log` runs after ETW patching (`-c`) but before the UAC bypass itself. FilterUnload requires elevated privileges; Phant0m requires `SeDebugPrivilege`.
 
 ---
 
@@ -533,6 +555,8 @@ This is not a UAC bypass — it requires the caller to already have local admini
 | Runtime PE construction | The `shadercache` method builds its payload DLL entirely in memory using `BinaryWriter` — no DLL file is dropped from resources or downloaded |
 | No external dependencies | Single-file build with `csc.exe`, no NuGet packages or build tools that could be fingerprinted |
 | Registry cleanup | All registry-based bypasses delete their keys after a 10-second delay |
+| Sysmon Driver Unload | `--blind-log`: calls `fltlib.dll!FilterUnload("SysmonDrv")` via D/Invoke — disables Sysmon kernel driver |
+| EventLog Blinding (Phant0m) | `--blind-log`: suspends `wevtsvc.dll` threads in EventLog svchost — service stays "running" but writes no events |
 
 ---
 
@@ -584,6 +608,17 @@ Alert on auto-elevating binaries (`fodhelper.exe`, `eventvwr.exe`, `ComputerDefa
 
 **Sysmon Event ID 1** — Alert on new processes whose token user (`NT AUTHORITY\SYSTEM`) does not match the parent process's user, which indicates a cross-identity token usage.
 
+### Sysmon Evasion (`--blind-log`)
+
+| Indicator | Detection Method | Detail |
+|-----------|-----------------|--------|
+| SysmonDrv minifilter unloaded | `fltMC.exe filters` shows SysmonDrv absent; Windows Event ID 6 (Driver loaded) gap | Sysmon telemetry stops completely after FilterUnload succeeds |
+| EventLog threads suspended | Windows Event ID gaps; `Get-WinEvent` returns no new entries despite activity | All `wevtsvc.dll` threads in svchost suspended — service "running" but not writing |
+| `fltlib.dll` loaded | Sysmon Event ID 7 (ImageLoaded) — if Sysmon is still active when fltlib is loaded | Unusual for non-driver-management processes to load fltlib.dll |
+| Thread suspension on svchost | ETW Thread events (if not also patched) | `SuspendThread` calls targeting EventLog svchost threads |
+
+**Countermeasures:** Protected Process Light (PPL) for the EventLog service prevents thread suspension. Sysmon's own driver can be set to minifilter altitude that resists `FilterUnload`. Monitor for `fltlib.dll` loads in unexpected processes.
+
 ---
 
 ## Architecture
@@ -604,7 +639,9 @@ SharpBypassUAC/
 │
 ├── CmsTPLua.cs             # CMSTPLUA COM elevation via D/Invoke
 ├── IntelShaderCache.cs     # Intel ShaderCache junction + DLL hijack via D/Invoke
-└── TokenImpersonation.cs   # Token duplication via D/Invoke
+├── TokenImpersonation.cs   # Token duplication via D/Invoke
+├── AntiForensic.cs         # ETW patch, Prefetch/ShimCache/BAM wipe, self-delete
+└── SysmonEvasion.cs        # Sysmon evasion (FilterUnload + Phant0m EventLog suspension)
 ```
 
 ---
