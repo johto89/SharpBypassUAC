@@ -21,6 +21,11 @@ namespace SharpBypassUAC
             Console.WriteLine("    diskcleanup      Environment variable hijack via SilentCleanup task");
             Console.WriteLine("    shadercache      Intel ShaderCache junction + DLL hijack (x64, requires Intel GPU)");
             Console.WriteLine("    cmstp            CMSTPLUA COM elevation (no registry modification)");
+            Console.WriteLine("    factoryserver    IElevatedFactoryServer two-step COM elevation (UACME #74)");
+            Console.WriteLine("    diagcpl          DiagCpl factory COM elevation (UACME #75)");
+            Console.WriteLine("    alpcdebug        ALPC debug object elevation (UACME #59)");
+            Console.WriteLine("    dotnetprofiler   .NET CLR Profiler DLL hijack (UACME #39)");
+            Console.WriteLine("    msdthijack       MSDT/sdiagnhost DLL hijack (UACME #72)");
             Console.WriteLine();
             Console.WriteLine("Token Impersonation:");
             Console.WriteLine("  SharpBypassUAC.exe -t <pid> -e <base64command> [-c]");
@@ -162,6 +167,21 @@ namespace SharpBypassUAC
                             break;
                         case "cmstp":
                             new CmsTPLua(encodedCommand);
+                            break;
+                        case "factoryserver":
+                            new ElevatedFactoryServer(encodedCommand);
+                            break;
+                        case "diagcpl":
+                            new DiagCpl(encodedCommand);
+                            break;
+                        case "alpcdebug":
+                            new AlpcDebug(encodedCommand);
+                            break;
+                        case "dotnetprofiler":
+                            new DotNetProfiler(encodedCommand);
+                            break;
+                        case "msdthijack":
+                            new MsdtDllHijack(encodedCommand);
                             break;
                         default:
                             Console.WriteLine("[!] Unknown method: " + bypass);

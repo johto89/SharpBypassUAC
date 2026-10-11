@@ -8,9 +8,11 @@
     left behind by common bypass primitives:
 
     Registry hijack:  fodhelper, eventvwr, sdclt, computerdefaults, slui
-    Env variable:     DiskCleanup (windir hijack)
+    Env variable:     DiskCleanup (windir hijack), .NET Profiler (COR_PROFILER #39)
     File system:      Intel ShaderCache junction + DLL hijack (oci.dll)
-    COM elevation:    CMSTPLUA COM object abuse
+    DLL hijack:       MSDT/sdiagnhost BluetoothDiagnosticUtil.dll (#72)
+    COM elevation:    CMSTPLUA, ElevatedFactoryServer (#74), DiagCpl factory (#75)
+    ALPC:             AppInfo RPC + debug object elevation (#59)
     Token abuse:      SeDebugPrivilege / token impersonation surface
 
     Additional checks: phantom DLL slots in System32, NTFS reparse points in
@@ -246,7 +248,10 @@ function Invoke-BypassArtifactCheck {
         @{ Technique='ms-settings DelegateExecute'; Path='HKCU:\Software\Classes\ms-settings\Shell\Open\command'; Value='DelegateExecute' }
         @{ Technique='Folder (sdclt)';            Path='HKCU:\Software\Classes\Folder\shell\open\command';      Value='(default)' }
         @{ Technique='exefile (slui)';            Path='HKCU:\Software\Classes\exefile\Shell\Open\command';     Value='(default)' }
-        @{ Technique='windir env (DiskCleanup)';  Path='HKCU:\Environment';                                     Value='windir' }
+        @{ Technique='windir env (DiskCleanup)';        Path='HKCU:\Environment';                                     Value='windir' }
+        @{ Technique='COR_ENABLE_PROFILING (.NET Profiler #39)'; Path='HKCU:\Environment';                              Value='COR_ENABLE_PROFILING' }
+        @{ Technique='COR_PROFILER (.NET Profiler #39)';         Path='HKCU:\Environment';                              Value='COR_PROFILER' }
+        @{ Technique='COR_PROFILER_PATH (.NET Profiler #39)';    Path='HKCU:\Environment';                              Value='COR_PROFILER_PATH' }
     )
 
     foreach ($t in $targets) {
@@ -258,9 +263,11 @@ function Invoke-BypassArtifactCheck {
             $data = [string]$prop.Value
 
             # windir normally resolves to C:\Windows; anything else is a classic hijack.
+            # COR_* values should never exist in HKCU\Environment on a clean system.
             $looksHijacked =
                 ($t.Value -eq 'windir' -and $data -and $data -notmatch '^[A-Za-z]:\\Windows\\?$') -or
-                ($t.Value -ne 'windir')
+                ($t.Value -like 'COR_*') -or
+                ($t.Value -ne 'windir' -and $t.Value -notlike 'COR_*')
 
             if (-not $looksHijacked) { continue }
 
@@ -358,6 +365,17 @@ function Invoke-PhantomDllCheck {
         @{ Dll='TSMSISrv.dll';   Loader='mmc.exe';                        Technique='MMC snap-in DLL hijack' }
         @{ Dll='ntwdblib.dll';   Loader='Various management tools';        Technique='SQL client DLL hijack' }
     )
+
+    # MSDT DLL hijack (#72): BluetoothDiagnosticUtil.dll in %LOCALAPPDATA%\Microsoft\WindowsApps
+    $msdtDllPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\BluetoothDiagnosticUtil.dll'
+    if (Test-Path $msdtDllPath) {
+        $signed = Test-FileMicrosoftSigned $msdtDllPath
+        New-Finding -Category 'DLL Hijack' -Severity $(if ($signed) { 'Medium' } else { 'Critical' }) `
+            -Title "BluetoothDiagnosticUtil.dll found in WindowsApps" `
+            -Detail "BluetoothDiagnosticUtil.dll exists in %LOCALAPPDATA%\Microsoft\WindowsApps. This file is used by the MSDT/sdiagnhost DLL hijack bypass (UACME #72). sdiagnhost.exe loads this DLL at high integrity when msdt.exe runs the Bluetooth diagnostic pack.$(if (-not $signed) { ' The file is NOT Microsoft-signed — strong indicator of active DLL hijack.' })" `
+            -Evidence @{ Path=$msdtDllPath; Signed=$signed; Technique='MSDT sdiagnhost DLL hijack (UACME #72)' }
+    }
+
     $sys32 = Join-Path $env:WINDIR 'System32'
 
     foreach ($entry in $phantomCandidates) {
@@ -437,10 +455,12 @@ function Invoke-COMElevationCheck {
     # This is by design on a normal system — but if the InProcServer32/LocalServer32
     # binary is missing, unsigned, or not Microsoft-owned, that's suspicious.
     $knownElevatableCLSIDs = @(
-        @{ CLSID='{3E5FC7F9-9A51-4367-9063-A120244FBEC7}'; Name='CMSTPLUA';        Technique='SharpBypassUAC cmstp method' }
-        @{ CLSID='{D2E7025F-2709-459E-8F70-3ABB3B2AF721}'; Name='ColorDataProxy';  Technique='UACME method 36' }
-        @{ CLSID='{9BA05972-F6A8-11CF-A442-00A0C90A8F39}'; Name='ShellWindows';    Technique='UACME method 22' }
-        @{ CLSID='{C090CEEA-B7E0-11D0-B775-00A0C906AF45}'; Name='CMSTPLuaUtil2';   Technique='Alternate CMSTPLUA interface' }
+        @{ CLSID='{3E5FC7F9-9A51-4367-9063-A120244FBEC7}'; Name='CMSTPLUA';                   Technique='SharpBypassUAC cmstp method' }
+        @{ CLSID='{D2E7025F-2709-459E-8F70-3ABB3B2AF721}'; Name='ColorDataProxy';             Technique='UACME method 36' }
+        @{ CLSID='{9BA05972-F6A8-11CF-A442-00A0C90A8F39}'; Name='ShellWindows';               Technique='UACME method 22' }
+        @{ CLSID='{C090CEEA-B7E0-11D0-B775-00A0C906AF45}'; Name='CMSTPLuaUtil2';              Technique='Alternate CMSTPLUA interface' }
+        @{ CLSID='{A6BFEA43-501F-456F-A845-983D3AD7B8F0}'; Name='VirtualFactoryServer';       Technique='SharpBypassUAC factoryserver (UACME #74)' }
+        @{ CLSID='{12C21EA7-2EB8-4B55-9249-AC243DA8C666}'; Name='DiagCplFactoryServer';       Technique='SharpBypassUAC diagcpl (UACME #75)' }
     )
 
     foreach ($entry in $knownElevatableCLSIDs) {
@@ -557,7 +577,7 @@ function Invoke-SysmonConfigCheck {
 
     New-Finding -Category 'Monitoring' -Severity 'Info' `
         -Title "Sysmon is running ($($running.Name))" `
-        -Detail 'Sysmon is active. Verify the configuration includes: Event 1 (Process Create), Event 5 (Process Terminate), Event 7 (Image Loaded with oci.dll/phantom DLLs), Event 10 (Process Access for token theft), Event 11 (File Create for reparse points), Event 12/13 (Registry Create/Value Set for HKCU hijack keys).' `
+        -Detail 'Sysmon is active. Verify the configuration includes: Event 1 (Process Create — DLLHost.exe with factory CLSIDs, msdt.exe, mmc.exe eventvwr.msc, computerdefaults.exe), Event 5 (Process Terminate), Event 7 (Image Loaded — oci.dll, BluetoothDiagnosticUtil.dll), Event 10 (Process Access for token theft), Event 11 (File Create for reparse points), Event 12/13 (Registry Create/Value Set — HKCU hijack keys, COR_PROFILER env vars).' `
         -Evidence @{ ServiceName=$running.Name; Status='Running' }
 
     # Check for Sysmon config by looking at its driver's event log channel
@@ -679,6 +699,80 @@ function Invoke-EventLogArtifactScan {
             }
         }
     } catch {}
+
+    # --- Sysmon Event ID 13: COR_PROFILER registry writes (.NET Profiler #39) ---
+    try {
+        if ($regEvents) {
+            foreach ($evt in $regEvents) {
+                $msg = $evt.Message
+                if ($msg -match 'COR_ENABLE_PROFILING|COR_PROFILER|COR_PROFILER_PATH') {
+                    New-Finding -Category 'Event Log Artifact' -Severity 'Critical' `
+                        -Title 'Sysmon: .NET Profiler env var set in registry (Event 13)' `
+                        -Detail "COR_PROFILER environment variable written to HKCU\\Environment. This is the primary indicator of the .NET CLR Profiler bypass (UACME #39). The CLR will load the attacker's DLL as a profiler in any .NET process." `
+                        -Evidence @{ EventId=13; TimeCreated=$evt.TimeCreated.ToString('o'); Message=$msg.Substring(0, [Math]::Min(500, $msg.Length)) }
+                    break
+                }
+            }
+        }
+    } catch {}
+
+    # --- Sysmon Event ID 1: Process Create — DLLHost.exe with factory CLSIDs (#74, #75) ---
+    try {
+        $procEvents = Get-WinEvent -FilterHashtable @{
+            LogName='Microsoft-Windows-Sysmon/Operational'; Id=1; StartTime=$cutoff
+        } -MaxEvents 1000 -ErrorAction Stop
+
+        foreach ($evt in $procEvents) {
+            $msg = $evt.Message
+            # IElevatedFactoryServer CLSIDs used by #74 and #75
+            if ($msg -match 'dllhost\.exe' -and ($msg -match 'A6BFEA43-501F-456F-A845-983D3AD7B8F0' -or $msg -match '12C21EA7-2EB8-4B55-9249-AC243DA8C666')) {
+                $technique = if ($msg -match 'A6BFEA43') { 'ElevatedFactoryServer (UACME #74)' } else { 'DiagCpl factory (UACME #75)' }
+                New-Finding -Category 'Event Log Artifact' -Severity 'Critical' `
+                    -Title "Sysmon: DLLHost.exe with factory server CLSID (Event 1)" `
+                    -Detail "DLLHost.exe spawned with /Processid matching $technique. This indicates a two-step COM elevation bypass via IElevatedFactoryServer → ICMLuaUtil chain." `
+                    -Evidence @{ EventId=1; TimeCreated=$evt.TimeCreated.ToString('o'); Technique=$technique; Message=$msg.Substring(0, [Math]::Min(500, $msg.Length)) }
+            }
+
+            # ALPC debug object bypass (#59): elevated computerdefaults.exe or winver.exe spawned
+            if ($msg -match 'computerdefaults\.exe' -and $msg -match 'High') {
+                New-Finding -Category 'Event Log Artifact' -Severity 'High' `
+                    -Title 'Sysmon: computerdefaults.exe at high integrity (Event 1)' `
+                    -Detail 'computerdefaults.exe running at high integrity level. This process is used by the ALPC debug object bypass (UACME #59) as the elevated target whose handle is captured via debug object manipulation.' `
+                    -Evidence @{ EventId=1; TimeCreated=$evt.TimeCreated.ToString('o'); Message=$msg.Substring(0, [Math]::Min(500, $msg.Length)) }
+            }
+
+            # MSDT DLL hijack (#72): msdt.exe with BluetoothDiagnostic
+            if ($msg -match 'msdt\.exe' -and $msg -match 'BluetoothDiagnostic') {
+                New-Finding -Category 'Event Log Artifact' -Severity 'Critical' `
+                    -Title 'Sysmon: msdt.exe with BluetoothDiagnostic pack (Event 1)' `
+                    -Detail 'msdt.exe launched with Bluetooth diagnostic pack arguments. This is the trigger for the MSDT/sdiagnhost DLL hijack bypass (UACME #72), which causes sdiagnhost.exe to load a hijacked BluetoothDiagnosticUtil.dll at high integrity.' `
+                    -Evidence @{ EventId=1; TimeCreated=$evt.TimeCreated.ToString('o'); Message=$msg.Substring(0, [Math]::Min(500, $msg.Length)) }
+            }
+
+            # .NET Profiler (#39): mmc.exe eventvwr.msc with COR_PROFILER set
+            if ($msg -match 'mmc\.exe' -and $msg -match 'eventvwr\.msc') {
+                New-Finding -Category 'Event Log Artifact' -Severity 'Medium' `
+                    -Title 'Sysmon: mmc.exe eventvwr.msc launched (Event 1)' `
+                    -Detail 'mmc.exe launched with eventvwr.msc snap-in. This is a common trigger for the .NET Profiler bypass (UACME #39). Cross-reference with COR_PROFILER registry writes to confirm exploitation.' `
+                    -Evidence @{ EventId=1; TimeCreated=$evt.TimeCreated.ToString('o'); Message=$msg.Substring(0, [Math]::Min(500, $msg.Length)) }
+            }
+        }
+    } catch {}
+
+    # --- Sysmon Event ID 7: Image Loaded — BluetoothDiagnosticUtil.dll loaded by sdiagnhost (#72) ---
+    try {
+        if ($loadEvents) {
+            foreach ($evt in $loadEvents) {
+                $msg = $evt.Message
+                if ($msg -match 'BluetoothDiagnosticUtil\.dll' -and $msg -match 'sdiagnhost\.exe') {
+                    New-Finding -Category 'Event Log Artifact' -Severity 'Critical' `
+                        -Title 'Sysmon: BluetoothDiagnosticUtil.dll loaded by sdiagnhost (Event 7)' `
+                        -Detail 'sdiagnhost.exe loaded BluetoothDiagnosticUtil.dll — this is the execution stage of the MSDT DLL hijack bypass (UACME #72). The payload DLL has been executed at high integrity.' `
+                        -Evidence @{ EventId=7; TimeCreated=$evt.TimeCreated.ToString('o'); Message=$msg.Substring(0, [Math]::Min(500, $msg.Length)) }
+                }
+            }
+        }
+    } catch {}
 }
 
 function Invoke-ReparsePointScan {
@@ -687,8 +781,9 @@ function Invoke-ReparsePointScan {
     # attacks. Legitimate junctions exist (e.g., Documents and Settings → Users)
     # but junctions in application data directories are suspicious.
     $scanPaths = @(
-        @{ Path=(Join-Path $env:LOCALAPPDATA 'Low\Intel');  Context='Intel ShaderCache bypass target' }
-        @{ Path=(Join-Path $env:LOCALAPPDATA 'Low');        Context='Low-integrity app data (general)' }
+        @{ Path=(Join-Path $env:LOCALAPPDATA 'Low\Intel');              Context='Intel ShaderCache bypass target' }
+        @{ Path=(Join-Path $env:LOCALAPPDATA 'Low');                    Context='Low-integrity app data (general)' }
+        @{ Path=(Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'); Context='MSDT DLL hijack target (UACME #72)' }
     )
 
     foreach ($scan in $scanPaths) {

