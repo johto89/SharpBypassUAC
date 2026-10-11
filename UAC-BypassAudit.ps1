@@ -63,16 +63,19 @@ function New-Finding {
         [Parameter(Mandatory)][ValidateSet('Critical','High','Medium','Low','Info')][string]$Severity,
         [Parameter(Mandatory)][string]$Title,
         [string]$Detail,
-        [object]$Evidence
+        [object]$Evidence,
+        [string]$ExploitCmd
     )
-    $script:Findings.Add([PSCustomObject]@{
-        Timestamp = (Get-Date).ToString('o')
-        Category  = $Category
-        Severity  = $Severity
-        Title     = $Title
-        Detail    = $Detail
-        Evidence  = $Evidence
-    })
+    $obj = [PSCustomObject]@{
+        Timestamp  = (Get-Date).ToString('o')
+        Category   = $Category
+        Severity   = $Severity
+        Title      = $Title
+        Detail     = $Detail
+        Evidence   = $Evidence
+        ExploitCmd = $ExploitCmd
+    }
+    $script:Findings.Add($obj)
 }
 
 function Test-IsAdministrator {
@@ -193,7 +196,8 @@ function Invoke-UACLevelCheck {
         New-Finding -Category 'UAC Config' -Severity 'Critical' `
             -Title 'UAC fully disabled (EnableLUA=0)' `
             -Detail 'All processes for admins run at High IL; UAC provides no boundary.' `
-            -Evidence @{ EnableLUA = $enableLUA }
+            -Evidence @{ EnableLUA = $enableLUA } `
+            -ExploitCmd 'UAC disabled — all processes already elevated. No bypass needed.'
     }
     # ConsentPromptBehaviorAdmin: 0 = elevate without prompting (vulnerable),
     # 2 = prompt on secure desktop (strongest), 5 = default (prompt for non-Windows binaries)
@@ -201,7 +205,8 @@ function Invoke-UACLevelCheck {
         New-Finding -Category 'UAC Config' -Severity 'High' `
             -Title 'Admin consent prompt disabled (ConsentPromptBehaviorAdmin=0)' `
             -Detail 'Elevation occurs silently; auto-elevate bypasses are trivial.' `
-            -Evidence @{ ConsentPromptBehaviorAdmin = $consentAdmin }
+            -Evidence @{ ConsentPromptBehaviorAdmin = $consentAdmin } `
+            -ExploitCmd 'Consent disabled — any auto-elevate method works silently. Suggested: SharpBypassUAC.exe -b cmstp -e <base64cmd>'
     }
     if ($secureDesktop -eq 0) {
         New-Finding -Category 'UAC Config' -Severity 'Medium' `
@@ -224,7 +229,8 @@ function Invoke-ElevationContextCheck {
         New-Finding -Category 'Context' -Severity 'Medium' `
             -Title 'Admin user running at Medium IL' `
             -Detail 'Member of Administrators but not elevated. UAC bypass would be the path to High IL. Also: many checks below need elevation to be reliable.' `
-            -Evidence @{ IsAdmin=$isAdmin; IntegrityLevel=$il }
+            -Evidence @{ IsAdmin=$isAdmin; IntegrityLevel=$il } `
+            -ExploitCmd 'SharpBypassUAC.exe -b fodhelper -e <base64cmd>   (or: cmstp, factoryserver, diagcpl, alpcdebug, dotnetprofiler, msdthijack)'
     } else {
         New-Finding -Category 'Context' -Severity 'Info' `
             -Title 'Elevation context' `
@@ -276,11 +282,23 @@ function Invoke-BypassArtifactCheck {
                 if ($data -match $p) { $suspicious = $true; break }
             }
 
+            # Map detected artifact to corresponding SharpBypassUAC method
+            $artifactExploit = switch -Wildcard ($t.Technique) {
+                '*eventvwr*'          { 'SharpBypassUAC.exe -b eventvwr -e <base64cmd>' }
+                '*fodhelper*'         { 'SharpBypassUAC.exe -b fodhelper -e <base64cmd>' }
+                '*computerdefaults*'  { 'SharpBypassUAC.exe -b computerdefaults -e <base64cmd>' }
+                '*sdclt*'             { 'SharpBypassUAC.exe -b sdclt -e <base64cmd>' }
+                '*slui*'              { 'SharpBypassUAC.exe -b slui -e <base64cmd>' }
+                '*DiskCleanup*'       { 'SharpBypassUAC.exe -b diskcleanup -e <base64cmd>  (command must end with && REM)' }
+                '*Profiler*'          { 'SharpBypassUAC.exe -b dotnetprofiler -e <base64cmd>' }
+                default               { $null }
+            }
             New-Finding -Category 'Bypass Artifact' `
                 -Severity ($(if ($suspicious) { 'Critical' } else { 'High' })) `
                 -Title "Hijack key present: $($t.Technique)" `
                 -Detail "HKCU override exists where a clean system has none$(if($suspicious){'; command string matches a suspicious pattern'})." `
-                -Evidence @{ Path=$t.Path; Value=$t.Value; Data=$data }
+                -Evidence @{ Path=$t.Path; Value=$t.Value; Data=$data } `
+                -ExploitCmd $artifactExploit
         } catch {
             New-Finding -Category 'Bypass Artifact' -Severity 'Info' `
                 -Title "Error reading $($t.Path)" -Detail $_.Exception.Message
@@ -373,7 +391,8 @@ function Invoke-PhantomDllCheck {
         New-Finding -Category 'DLL Hijack' -Severity $(if ($signed) { 'Medium' } else { 'Critical' }) `
             -Title "BluetoothDiagnosticUtil.dll found in WindowsApps" `
             -Detail "BluetoothDiagnosticUtil.dll exists in %LOCALAPPDATA%\Microsoft\WindowsApps. This file is used by the MSDT/sdiagnhost DLL hijack bypass (UACME #72). sdiagnhost.exe loads this DLL at high integrity when msdt.exe runs the Bluetooth diagnostic pack.$(if (-not $signed) { ' The file is NOT Microsoft-signed — strong indicator of active DLL hijack.' })" `
-            -Evidence @{ Path=$msdtDllPath; Signed=$signed; Technique='MSDT sdiagnhost DLL hijack (UACME #72)' }
+            -Evidence @{ Path=$msdtDllPath; Signed=$signed; Technique='MSDT sdiagnhost DLL hijack (UACME #72)' } `
+            -ExploitCmd 'SharpBypassUAC.exe -b msdthijack -e <base64cmd>'
     }
 
     $sys32 = Join-Path $env:WINDIR 'System32'
@@ -382,10 +401,12 @@ function Invoke-PhantomDllCheck {
         $dll  = $entry.Dll
         $full = Join-Path $sys32 $dll
         if (-not (Test-Path $full)) {
+            $phantomExploit = if ($dll -eq 'oci.dll') { 'SharpBypassUAC.exe -b shadercache -e <base64cmd>' } else { $null }
             New-Finding -Category 'DLL Hijack' -Severity 'Info' `
                 -Title "Phantom DLL slot available: $dll" `
                 -Detail "Absent from System32. Loaded by $($entry.Loader). Technique: $($entry.Technique). Not an active compromise, but an attacker with write access to System32 could plant a payload here." `
-                -Evidence @{ ExpectedPath=$full; Loader=$entry.Loader; Technique=$entry.Technique }
+                -Evidence @{ ExpectedPath=$full; Loader=$entry.Loader; Technique=$entry.Technique } `
+                -ExploitCmd $phantomExploit
         } else {
             # It exists — only interesting if it is NOT Microsoft-signed.
             if (-not (Test-FileMicrosoftSigned $full)) {
@@ -432,7 +453,8 @@ function Invoke-ShaderCacheJunctionCheck {
             New-Finding -Category 'ShaderCache' -Severity $severity `
                 -Title 'ShaderCache directory is a reparse point (junction)' `
                 -Detail $detail `
-                -Evidence @{ Path=$shaderCachePath; ReparseTarget=$target }
+                -Evidence @{ Path=$shaderCachePath; ReparseTarget=$target } `
+                -ExploitCmd 'SharpBypassUAC.exe -b shadercache -e <base64cmd>   (x64 only, requires Intel GPU)'
         } else {
             New-Finding -Category 'ShaderCache' -Severity 'Info' `
                 -Title 'ShaderCache directory is a normal directory' `
@@ -503,10 +525,18 @@ function Invoke-COMElevationCheck {
                     $detail  += ' The server binary is NOT Microsoft-signed — possible COM object hijack.'
                 }
 
+                # Map COM class to SharpBypassUAC method name
+                $exploitMethod = switch ($entry.Name) {
+                    'CMSTPLUA'              { 'SharpBypassUAC.exe -b cmstp -e <base64cmd>' }
+                    'VirtualFactoryServer'  { 'SharpBypassUAC.exe -b factoryserver -e <base64cmd>' }
+                    'DiagCplFactoryServer'  { 'SharpBypassUAC.exe -b diagcpl -e <base64cmd>' }
+                    default                 { $null }
+                }
                 New-Finding -Category 'COM Elevation' -Severity $severity `
                     -Title "Auto-elevate COM class: $($entry.Name) $($entry.CLSID)" `
                     -Detail $detail `
-                    -Evidence @{ CLSID=$entry.CLSID; Name=$entry.Name; ServerBinary=$serverBinary; Signed=$signed; Technique=$entry.Technique }
+                    -Evidence @{ CLSID=$entry.CLSID; Name=$entry.Name; ServerBinary=$serverBinary; Signed=$signed; Technique=$entry.Technique } `
+                    -ExploitCmd $exploitMethod
             }
         } catch {
             continue
@@ -529,7 +559,8 @@ function Invoke-TokenImpersonationSurfaceCheck {
             New-Finding -Category 'Token Surface' -Severity $(if ($enabled) { 'High' } else { 'Medium' }) `
                 -Title "SeDebugPrivilege $(if ($enabled) { 'enabled' } else { 'available (disabled)' })" `
                 -Detail "SeDebugPrivilege allows opening any process including SYSTEM-level. $(if ($enabled) { 'Currently ENABLED — token impersonation attack is possible right now.' } else { 'Currently disabled but available — can be enabled by the process.' }) This is the key privilege for SharpBypassUAC token impersonation (-t)." `
-                -Evidence @{ Privilege='SeDebugPrivilege'; Status=$(if ($enabled) { 'Enabled' } else { 'Disabled' }) }
+                -Evidence @{ Privilege='SeDebugPrivilege'; Status=$(if ($enabled) { 'Enabled' } else { 'Disabled' }) } `
+                -ExploitCmd 'SharpBypassUAC.exe -t <pid> -e <base64cmd>   (target winlogon.exe or lsass.exe PID for SYSTEM)'
         }
     } catch {}
 
@@ -545,10 +576,12 @@ function Invoke-TokenImpersonationSurfaceCheck {
         try {
             $running = Get-Process -Name $proc.Name -ErrorAction SilentlyContinue
             if ($running) {
+                $pid_val = ($running | Select-Object -First 1).Id
                 New-Finding -Category 'Token Surface' -Severity 'Info' `
-                    -Title "Token source available: $($proc.Name).exe (PID: $(($running | Select-Object -First 1).Id))" `
+                    -Title "Token source available: $($proc.Name).exe (PID: $pid_val)" `
                     -Detail "$($proc.Risk). Runs as $($proc.Identity). SharpBypassUAC -t <pid> targets this process." `
-                    -Evidence @{ Process=$proc.Name; PID=($running | Select-Object -First 1).Id; ExpectedIdentity=$proc.Identity }
+                    -Evidence @{ Process=$proc.Name; PID=$pid_val; ExpectedIdentity=$proc.Identity } `
+                    -ExploitCmd "SharpBypassUAC.exe -t $pid_val -e <base64cmd>"
             }
         } catch {}
     }
@@ -562,7 +595,8 @@ function Invoke-SysmonConfigCheck {
     if (-not $sysmonService) {
         New-Finding -Category 'Monitoring' -Severity 'High' `
             -Title 'Sysmon not installed' `
-            -Detail 'Sysmon is not running on this host. Without Sysmon, detection of UAC bypass techniques relies solely on Windows Security event logs, which lack the granularity needed for: DLL load monitoring (Event 7), registry value set details (Event 13), reparse point creation (Event 11), and process access chains (Event 10).'
+            -Detail 'Sysmon is not running on this host. Without Sysmon, detection of UAC bypass techniques relies solely on Windows Security event logs, which lack the granularity needed for: DLL load monitoring (Event 7), registry value set details (Event 13), reparse point creation (Event 11), and process access chains (Event 10).' `
+            -ExploitCmd 'No Sysmon — bypass detection is minimal. All methods viable without --blind-log.'
         return
     }
 
@@ -571,7 +605,8 @@ function Invoke-SysmonConfigCheck {
         New-Finding -Category 'Monitoring' -Severity 'High' `
             -Title 'Sysmon installed but not running' `
             -Detail "Sysmon service exists ($($sysmonService.Name)) but is not in Running state. No events are being logged." `
-            -Evidence @{ ServiceName=$sysmonService.Name; Status=$sysmonService.Status }
+            -Evidence @{ ServiceName=$sysmonService.Name; Status=$sysmonService.Status } `
+            -ExploitCmd 'Sysmon not running — bypass detection is minimal. All methods viable without --blind-log.'
         return
     }
 
@@ -857,9 +892,28 @@ if ($AsJson) {
     $script:Findings | ConvertTo-Json -Depth 6
 } else {
     $order = @{ Critical=0; High=1; Medium=2; Low=3; Info=4 }
-    $script:Findings |
-        Sort-Object { $order[$_.Severity] }, Category |
-        Format-Table Severity, Category, Title -AutoSize -Wrap
+    $sorted = $script:Findings | Sort-Object { $order[$_.Severity] }, Category
+
+    $sorted | Format-Table Severity, Category, Title -AutoSize -Wrap
+
+    # Display exploit commands for actionable findings
+    $exploitable = $sorted | Where-Object { $_.ExploitCmd }
+    if ($exploitable) {
+        Write-Host ""
+        Write-Host "=== Suggested SharpBypassUAC Commands ===" -ForegroundColor Yellow
+        Write-Host ""
+        foreach ($f in $exploitable) {
+            $color = switch ($f.Severity) {
+                'Critical' { 'Red' }
+                'High'     { 'DarkYellow' }
+                'Medium'   { 'Yellow' }
+                default    { 'Gray' }
+            }
+            Write-Host "  [$($f.Severity)] $($f.Title)" -ForegroundColor $color
+            Write-Host "    -> $($f.ExploitCmd)" -ForegroundColor Cyan
+            Write-Host ""
+        }
+    }
 
     $summary = $script:Findings | Group-Object Severity |
         Sort-Object { $order[$_.Name] } |
